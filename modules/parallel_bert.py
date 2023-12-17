@@ -7,7 +7,7 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-from parallel_linear import ParallelLinear as pLinear
+from .parallel_linear import ParallelLinear
 
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
@@ -143,9 +143,9 @@ class PBertSelfAttention(nn.Module):
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
 
-        self.query = pLinear(config.hidden_size, self.all_head_size)
-        self.key = pLinear(config.hidden_size, self.all_head_size)
-        self.value = pLinear(config.hidden_size, self.all_head_size)
+        self.query = ParallelLinear(config.hidden_size, self.all_head_size)
+        self.key = ParallelLinear(config.hidden_size, self.all_head_size)
+        self.value = ParallelLinear(config.hidden_size, self.all_head_size)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
         self.position_embedding_type = position_embedding_type or getattr(
@@ -267,7 +267,7 @@ class PBertSelfAttention(nn.Module):
 class PBertSelfOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = pLinear(config.hidden_size, config.hidden_size)
+        self.dense = ParallelLinear(config.hidden_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
@@ -330,7 +330,7 @@ class PBertAttention(nn.Module):
 class PBertIntermediate(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = pLinear(config.hidden_size, config.intermediate_size)
+        self.dense = ParallelLinear(config.hidden_size, config.intermediate_size)
         if isinstance(config.hidden_act, str):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
@@ -345,7 +345,7 @@ class PBertIntermediate(nn.Module):
 class PBertOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = pLinear(config.intermediate_size, config.hidden_size)
+        self.dense = ParallelLinear(config.intermediate_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
@@ -538,7 +538,7 @@ class PBertEncoder(nn.Module):
 class PBertPooler(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = pLinear(config.hidden_size, config.hidden_size)
+        self.dense = ParallelLinear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -553,7 +553,7 @@ class PBertPooler(nn.Module):
 class PBertPredictionHeadTransform(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = pLinear(config.hidden_size, config.hidden_size)
+        self.dense = ParallelLinear(config.hidden_size, config.hidden_size)
         if isinstance(config.hidden_act, str):
             self.transform_act_fn = ACT2FN[config.hidden_act]
         else:
@@ -574,7 +574,7 @@ class PBertLMPredictionHead(nn.Module):
 
         # The output weights are the same as the input embeddings, but there is
         # an output-only bias for each token.
-        self.decoder = pLinear(config.hidden_size, config.vocab_size, bias=False)
+        self.decoder = ParallelLinear(config.hidden_size, config.vocab_size, bias=False)
 
         self.bias = nn.Parameter(torch.zeros(config.vocab_size))
 
@@ -590,7 +590,7 @@ class PBertPreTrainingHeads(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.predictions = PBertLMPredictionHead(config)
-        self.seq_relationship = pLinear(config.hidden_size, 2)
+        self.seq_relationship = ParallelLinear(config.hidden_size, 2)
 
     def forward(self, sequence_output, pooled_output):
         prediction_scores = self.predictions(sequence_output)
@@ -610,7 +610,7 @@ class PBertPreTrainedModel(PreTrainedModel):
 
     def _init_weights(self, module):
         """Initialize the weights"""
-        if isinstance(module, pLinear):
+        if isinstance(module, ParallelLinear):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
             module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
@@ -623,6 +623,16 @@ class PBertPreTrainedModel(PreTrainedModel):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+    
+    def update_weight(self):
+        for _, module in self.named_children():
+            if type(module) == ParallelLinear:
+                # print(module)
+                module.divide_weight()
+            try:
+                self.update_weight(module)
+            except:
+                pass
 
 
 @dataclass
@@ -1032,7 +1042,7 @@ class PBertForSequenceClassification(PBertPreTrainedModel):
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
         self.dropout = nn.Dropout(classifier_dropout)
-        self.classifier = pLinear(config.hidden_size, config.num_labels)
+        self.classifier = ParallelLinear(config.hidden_size, config.num_labels)
 
         # Initialize weights and apply final processing
         self.post_init()
