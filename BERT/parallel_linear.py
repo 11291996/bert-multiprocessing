@@ -1,35 +1,26 @@
 import torch
 from torch import Tensor
-from torch.nn.parameter import Parameter
-from torch.nn.modules.module import Module
+from torch import nn
+from torch.nn import Parameter, init
+from torch.nn import functional as F
 import math
-from torch.nn import init, functional as F
 
-from torch import Tensor
-from torch.nn.parameter import Parameter
-from torch.nn.modules.module import Module
-import math
-from torch.nn import init, functional as F
-
-class ParallelLinear(Module):
+class ParallelLinear(nn.Module):
     __constants__ = ['in_features', 'out_features']
     in_features: int
     out_features: int
     weight: Tensor
-
+    
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
                  dtype=None) -> None:
-        
-        device = [i for i in range(torch.cuda.device_count())]
 
         factory_kwargs = {'device': torch.device("cpu"), 'dtype': dtype}
-        factory_kwargs_right = {'device': torch.device("cuda:0"), 'dtype': dtype}
         factory_kwargs_left = {'device': torch.device("cuda:1"), 'dtype': dtype}
+        factory_kwargs_right = {'device': torch.device("cuda:0"), 'dtype': dtype}
 
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        
         self.left_weight = Parameter(torch.empty((out_features, in_features // 2), **factory_kwargs_left))
         self.right_weight = Parameter(torch.empty((out_features, in_features // 2 + in_features % 2), **factory_kwargs_right))
         
@@ -39,11 +30,7 @@ class ParallelLinear(Module):
             self.register_parameter('bias', None)
         self.reset_parameters()
 
-
     def reset_parameters(self) -> None:
-        # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
-        # uniform(-1/sqrt(in_features), 1/sqrt(in_features)). For details, see
-        # https://github.com/pytorch/pytorch/issues/57109
         init.kaiming_uniform_(self.left_weight, a=math.sqrt(5))
         init.kaiming_uniform_(self.right_weight, a=math.sqrt(5))
         if self.bias is not None:
@@ -52,12 +39,15 @@ class ParallelLinear(Module):
             init.uniform_(self.bias, -bound, bound)
 
     def forward(self, input: Tensor) -> Tensor:
+        # devide
         left_input = input[:,:(self.in_features // 2)].to(torch.device("cuda:1"))
         right_input = input[:,(self.in_features // 2):].to(torch.device("cuda:0"))
 
+        # partial linear operation
         left_product = F.linear(left_input, self.left_weight)
         right_product = F.linear(right_input, self.right_weight)
         
+        # summation
         left_product = left_product.to(torch.device("cpu"))
         right_product = right_product.to(torch.device("cpu"))
         return left_product + right_product + self.bias
