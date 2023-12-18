@@ -5,14 +5,9 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Tenso
 from modules.parallel_bert import PBertForSequenceClassification
 import numpy as np
 from tqdm import tqdm
-from accelerate import Accelerator
-import time 
+import time
 
-class linear_trainer:
-    def __init__(self) -> None:
-        pass
-
-class bert_trainer:
+class trainer:
     def __init__(self) -> None:
 
         tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -76,6 +71,7 @@ class bert_trainer:
     def training(self, model, epoch, batch_size, device_name):
         #create the DataLoaders for our training and validation sets.
         #we'll take training samples in random order. 
+        model = self.model
         self.train_dataloader = DataLoader(
                         self.train_dataset,  # The training samples.
                         sampler = RandomSampler(self.train_dataset), # Select batches randomly
@@ -88,34 +84,30 @@ class bert_trainer:
                     batch_size = batch_size # Evaluate with this batch size.
                 )
 
-        seed_val = 42
+        self.seed_val = 42
 
-        total_steps = len(self.train_dataloader) * epoch
+        self.total_steps = len(self.train_dataloader) * epoch
 
-        optimizer = AdamW(model.parameters(),
+        self.optimizer = AdamW(model.parameters(),
               lr = 2e-5, # args.learning_rate - default is 5e-5, our notebook had 2e-5
               eps = 1e-8 # args.adam_epsilon  - default is 1e-8.
         )
 
         # Create the learning rate scheduler.
-        scheduler = get_linear_schedule_with_warmup(optimizer, 
+        self.scheduler = get_linear_schedule_with_warmup(self.optimizer, 
                                             num_warmup_steps = 0, # Default value in run_glue.py
-                                            num_training_steps = total_steps
+                                            num_training_steps = self.total_steps
         )
-        torch.manual_seed(seed_val)
-        torch.cuda.manual_seed_all(seed_val)
+        torch.manual_seed(self.seed_val)
+        torch.cuda.manual_seed_all(self.seed_val)
         if device_name == "cuda":
             device = torch.device("cuda")
-            model.to(device)
-        if device_name == "multi cuda":
-            accelerator = Accelerator()
-            model, optimizer, self.train_dataloader, self.validation_dataloader, scheduler = \
-            accelerator.prepare(model, optimizer, self.train_dataloader, self.validation_dataloader, scheduler)
+            self.model.to(device)
         start_time = time.time()
         for epoch_i in range(epoch):
             total_train_loss = 0
 
-            model.train()
+            self.model.train()
 
             for step, batch in enumerate(tqdm(self.train_dataloader, desc = "train_step", mininterval=0.01)):
                 if device_name == "cuda":
@@ -127,34 +119,31 @@ class bert_trainer:
                     b_input_mask = batch[1]
                     b_labels = batch[2]
 
-                model.zero_grad()
+                self.model.zero_grad()
 
-                output = model(b_input_ids, 
+                output = self.model(b_input_ids, 
                                      token_type_ids=None, 
                                      attention_mask=b_input_mask, 
                                      labels=b_labels)
                 loss = output.loss
                 logits = output.logits
 
+                loss.backward()
+                    
                 total_train_loss += loss.item()
-
-                if device_name == "multi cuda":
-                    accelerator.backward(loss)
-                else: loss.backward()
 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-                optimizer.step()
+                self.optimizer.step()
 
-                scheduler.step()
-            if device_name == "multi cuda":
-                avg_train_loss = accelerator.gather(total_train_loss) / len(self.train_dataloader)
-            else: avg_train_loss = total_train_loss / len(self.train_dataloader)
+                self.scheduler.step()
+
+            avg_train_loss = total_train_loss / len(self.train_dataloader)
 
             print("")
             print("  Average training loss: {0:.2f}".format(avg_train_loss))
 
-            model.eval()
+            self.model.eval()
 
             # Tracking variables 
             total_eval_accuracy = 0
@@ -201,8 +190,7 @@ class bert_trainer:
 
                     loss = output.loss
                     logits = output.logits
-
-                # Accumulate the validation loss.
+                
                 total_eval_loss += loss.item()
 
                 # Move logits and labels to CPU
@@ -215,10 +203,7 @@ class bert_trainer:
 
 
             # Report the final accuracy for this validation run.
-            if device_name == "multi cuda":
-                avg_val_accuracy = accelerator.gather(total_eval_accuracy) / len(self.validation_dataloader)
-            else:
-                avg_val_accuracy = total_eval_accuracy / len(self.validation_dataloader)
+            avg_val_accuracy = total_eval_accuracy / len(self.validation_dataloader)
             print("  Accuracy: {0:.2f}".format(avg_val_accuracy))
 
             # Calculate the average loss over all of the batches.
@@ -232,7 +217,6 @@ class bert_trainer:
         print("Training complete!")
         print("Time taken: {}".format(end_time - start_time))
 
-    
 
     def train(self, model_name, epoch, batch_size, device):
         if model_name == "bert":
@@ -245,8 +229,6 @@ class bert_trainer:
                 )
             if device == "cuda":
                 self.training(self.model, epoch, batch_size, device_name = "cuda")
-            elif device == "mulit cuda": 
-                self.training(self.model, epoch, batch_size, device_name = "multi cuda")
             else: 
                 self.training(self.model, epoch, batch_size, device_name = "None")
 
